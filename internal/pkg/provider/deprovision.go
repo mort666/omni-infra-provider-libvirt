@@ -16,7 +16,7 @@ import (
 	"github.com/siderolabs/omni/client/pkg/omni/resources/infra"
 	"go.uber.org/zap"
 
-	"github.com/siderolabs/omni-infra-provider-libvirt/internal/pkg/provider/resources"
+	"github.com/mort666/omni-infra-provider-libvirt/internal/pkg/provider/resources"
 )
 
 // Deprovision implements infra.Provisioner.
@@ -27,12 +27,17 @@ func (p *Provisioner) Deprovision(ctx context.Context, logger *zap.Logger, machi
 		return provision.NewRetryError(errors.New("empty vmName"), time.Second*10)
 	}
 
+	if err := removeVolNVRam(p.libvirtClient, machine, "nvram", logger); err != nil {
+		return fmt.Errorf("remove cidata volume: %w", err)
+	}
+
 	if err := removeDomain(p.libvirtClient, vmName, logger); err != nil {
 		return err
 	}
 
 	poolName := machine.TypedSpec().Value.PoolName
 	volName := machine.TypedSpec().Value.VmVolName
+	isoName := machine.TypedSpec().Value.IsoVolName
 
 	if poolName == "" {
 		logger.Warn("pool name is empty, skip disk removal")
@@ -48,11 +53,19 @@ func (p *Provisioner) Deprovision(ctx context.Context, logger *zap.Logger, machi
 		}
 	}
 
+	if isoName == "" {
+		logger.Warn("vol name is empty, skip iso disk removal")
+	} else {
+		if err := removeVolISO(p.libvirtClient, machine, "isos", logger); err != nil {
+			return err
+		}
+	}
+
 	if err := removeVolAdditionalDisks(p.libvirtClient, machine, poolName, logger); err != nil {
 		return fmt.Errorf("remove additional volumes: %w", err)
 	}
 
-	if err := removeVolCidata(p.libvirtClient, machine, poolName, logger); err != nil {
+	if err := removeVolCidata(p.libvirtClient, machine, "config", logger); err != nil {
 		return fmt.Errorf("remove cidata volume: %w", err)
 	}
 
@@ -93,7 +106,7 @@ func removeDomain(lc *libvirt.Libvirt, vmName string, logger *zap.Logger) error 
 		case int32(libvirt.DomainShutoff):
 			{
 				// in libvirt, "undefine" translates to "delete a VM"
-				err = lc.DomainUndefine(dom)
+				err = lc.DomainUndefineFlags(dom, libvirt.DomainUndefineNvram|libvirt.DomainUndefineTpm)
 				if err != nil {
 					return fmt.Errorf("undefine VM: %w", err)
 				}
@@ -171,5 +184,65 @@ func removeVolCidata(lc *libvirt.Libvirt, machine *resources.Machine, poolName s
 		}
 	}
 
+	return nil
+}
+
+func removeVolISO(lc *libvirt.Libvirt, machine *resources.Machine, poolName string, logger *zap.Logger) error {
+	if isoVolName := machine.TypedSpec().Value.IsoVolName; isoVolName != "" {
+		isoVol, err := getVol(lc, poolName, isoVolName)
+		if err != nil {
+			if !errors.Is(err, errVolNoExist) {
+				return fmt.Errorf("fetching ISO volume %s: %w", isoVolName, err)
+			}
+
+			logger.Info("cidata volume was removed already: " + isoVolName)
+		} else {
+			err = lc.StorageVolDelete(isoVol, 0)
+			if err != nil {
+				return fmt.Errorf("delete ISO volume: %w", err)
+			}
+
+			logger.Info("removed ISO volume: " + isoVolName)
+		}
+	}
+
+	return nil
+}
+
+func removeVolNVRam(lc *libvirt.Libvirt, machine *resources.Machine, poolName string, logger *zap.Logger) error {
+	vmNvramName := machine.TypedSpec().Value.VmNvramName
+
+	if vmNvramName != "" {
+		nvramVol, err := getVol(lc, poolName, vmNvramName)
+		if err != nil {
+			if !errors.Is(err, errVolNoExist) {
+				return fmt.Errorf("fetching NVRAM volume %s: %w", vmNvramName, err)
+			}
+
+			logger.Info("NVRAM volume was removed already: " + vmNvramName)
+		} else {
+			err = lc.StorageVolDelete(nvramVol, 0)
+			if err != nil {
+				return fmt.Errorf("delete NVRAM volume: %w", err)
+			}
+
+			logger.Info("removed NVRAM volume: " + vmNvramName)
+		}
+	} else if vmNvramName == ""  {
+		vmNvramName = fmt.Sprintf("%s_VARS.fd", machine.TypedSpec().Value.VmName)
+		nvramVol, err := getVol(lc, poolName, vmNvramName)
+		if err != nil {
+			if !errors.Is(err, errVolNoExist) {
+				return fmt.Errorf("fetching NVRAM volume %s: %w", vmNvramName, err)
+		}
+	} else {
+			err = lc.StorageVolDelete(nvramVol, 0)
+			if err != nil {
+				return fmt.Errorf("delete NVRAM volume: %w", err)
+			}
+
+			logger.Info("removed NVRAM volume: " + vmNvramName)
+		}
+	}
 	return nil
 }

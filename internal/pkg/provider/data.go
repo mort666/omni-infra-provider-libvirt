@@ -20,6 +20,9 @@ type additionalDisk struct {
 }
 
 type networkInterface struct {
-	Driver      string `yaml:"driver"`
-	NetworkName string `yaml:"network_name"`
+	Driver          string `yaml:"driver"`
+	NetworkName     string `yaml:"network_name"`
+	BridgeName      string `yaml:"bridge_name"`
+	TargetName      string `yaml:"target_name"`
+	PhysicalAddress string `yaml:"physical_address"`
 }

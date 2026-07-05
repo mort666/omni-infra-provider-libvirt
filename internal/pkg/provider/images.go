@@ -24,7 +24,8 @@ import (
 const (
 	// DefaultCachePath is the default directory for caching downloaded images.
 	DefaultCachePath = "/tmp/omni-libvirt-cache"
-
+	DefaultArch      = "amd64"
+	DefaultPlatform  = "nocloud"
 	// DefaultCleanupInterval is the default interval between cleanup runs.
 	DefaultCleanupInterval = time.Hour
 
@@ -67,15 +68,15 @@ func NewImageCache(logger *zap.Logger, imageCachePath string) *ImageCache {
 }
 
 // cacheKey generates a unique cache key for an image.
-func cacheKey(schematicID, talosVersion string) string {
-	return fmt.Sprintf("%s-%s.qcow2.gz", schematicID, talosVersion)
+func cacheKey(schematicID, talosVersion, format, arch string) string {
+	return fmt.Sprintf("%s-%s-nocloud-%s-%s", schematicID, talosVersion, format, arch)
 }
 
 // Acquire increments the reference count for an image and downloads it, if necessary.
 // Returns the path to the cached image file.
 // The caller must call Release() when done with the image.
-func (c *ImageCache) Acquire(ctx context.Context, schematicID, talosVersion string) (string, error) {
-	key := cacheKey(schematicID, talosVersion)
+func (c *ImageCache) Acquire(ctx context.Context, schematicID, talosVersion string, format string) (string, error) {
+	key := cacheKey(schematicID, talosVersion, format, DefaultArch)
 	filePath := filepath.Join(c.CachePath, key)
 
 	// Increment reference count
@@ -97,10 +98,11 @@ func (c *ImageCache) Acquire(ctx context.Context, schematicID, talosVersion stri
 		}
 
 		// Download the image
-		err := c.download(ctx, key, schematicID, talosVersion)
+		err := c.download(ctx, key, schematicID, talosVersion, format)
 
 		return nil, err
 	})
+
 	if err != nil {
 		// Decrement reference count on error
 		c.mu.Lock()
@@ -119,8 +121,8 @@ func (c *ImageCache) Acquire(ctx context.Context, schematicID, talosVersion stri
 }
 
 // Release decrements the reference count for an image and updates the last used time.
-func (c *ImageCache) Release(schematicID, talosVersion string) {
-	key := cacheKey(schematicID, talosVersion)
+func (c *ImageCache) Release(schematicID, talosVersion, format string) {
+	key := cacheKey(schematicID, talosVersion, format, DefaultArch)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -218,19 +220,13 @@ func (c *ImageCache) cleanup() {
 
 // download fetches an image from the image factory and saves it to the cache.
 // It uses a temporary file and atomic rename to prevent partial downloads.
-func (c *ImageCache) download(ctx context.Context, key, schematicID, talosVersion string) error {
+func (c *ImageCache) download(ctx context.Context, key, schematicID, talosVersion, format string) error {
 	imageURL, err := url.Parse(constants.ImageFactoryBaseURL)
 	if err != nil {
 		return fmt.Errorf("failed to parse image factory URL: %w", err)
 	}
 
-	const (
-		arch     = "amd64"
-		format   = "qcow2.gz"
-		platform = "nocloud"
-	)
-
-	imagePath := fmt.Sprintf("%s-%s.%s", platform, arch, format)
+	imagePath := fmt.Sprintf("%s-%s.%s", DefaultPlatform, DefaultArch, format)
 	imageURL = imageURL.JoinPath("image", schematicID, talosVersion, imagePath)
 
 	c.logger.Info(

@@ -22,13 +22,16 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"go.yaml.in/yaml/v3"
+	"github.com/goccy/go-yaml"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/siderolabs/omni-infra-provider-libvirt/internal/pkg/config"
-	"github.com/siderolabs/omni-infra-provider-libvirt/internal/pkg/provider"
-	"github.com/siderolabs/omni-infra-provider-libvirt/internal/pkg/provider/meta"
+	"github.com/mort666/omni-infra-provider-libvirt/internal/pkg/config"
+	libvirtmanager "github.com/mort666/omni-infra-provider-libvirt/internal/pkg/libvirt"
+	"github.com/mort666/omni-infra-provider-libvirt/internal/pkg/provider"
+	"github.com/mort666/omni-infra-provider-libvirt/internal/pkg/provider/meta"
 )
+
+const DefaultConfigCachePath = "/tmp/omni-libvirt-config-cache"
 
 //go:embed data/schema.json
 var schema string
@@ -104,9 +107,23 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("failed to create cache directory: %w", err)
 		}
 
+		// Ensure cache directory exists
+		err = os.MkdirAll(DefaultConfigCachePath, 0o755)
+		if err != nil {
+			return fmt.Errorf("failed to create cache directory: %w", err)
+		}
+
 		imageCache := provider.NewImageCache(logger, cfg.imageCachePath)
 
-		provisioner := provider.NewProvisioner(libvirtClient, imageCache)
+		manager, err := libvirtmanager.NewLibvirtManager(&libvirtmanager.LibvirtOptions{
+			URI: uri.String(),
+			BaseImageDir: cfg.imageCachePath,
+		}, logger)
+		if err != nil {
+			return fmt.Errorf("failed to setup libvirt manager: %w", err)
+		}
+
+		provisioner := provider.NewProvisioner(libvirtClient, imageCache, manager)
 
 		ip, err := infra.NewProvider(meta.ProviderID, provisioner, infra.ProviderConfig{
 			Name:        cfg.providerName,

@@ -58,7 +58,9 @@
         {
           "driver": "virtio",
           "network_name": "default",
-          "physical_address": ""
+          "physical_address": "",
+          "target_name": "omnibr0",
+          "bridge_name": "ovsbr0"
         }
       ],
       "items": {
@@ -80,11 +82,20 @@
             "type": "string",
             "description": "libvirt network name. Must exist, the provider will not create it.",
             "default": "default"
+          },
+          "target_name": {
+            "type": "string",
+            "description": "Target Interface name.",
+            "default": "omnibr0"
+          },
+          "bridge_name": {
+            "type": "string",
+            "description": "Open vSwitch Bridge name. Must exist, the provider will not create it.",
+            "default": "ovsbr0"
           }
         },
         "required": [
-          "driver",
-          "network_name"
+          "driver"
         ]
       }
     }

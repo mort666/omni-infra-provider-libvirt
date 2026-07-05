@@ -88,7 +88,7 @@ FROM tools AS proto-compile
 COPY --from=proto-specs / /
 RUN protoc -I/api --go_out=paths=source_relative:/api --go-grpc_out=paths=source_relative:/api --go-vtproto_out=paths=source_relative:/api --go-vtproto_opt=features=marshal+unmarshal+size+equal+clone /api/specs/specs.proto
 RUN rm /api/specs/specs.proto
-RUN goimports -w -local github.com/siderolabs/omni-infra-provider-libvirt /api
+RUN goimports -w -local github.com/mort666/omni-infra-provider-libvirt /api
 RUN gofumpt -w /api
 
 # runs gofumpt
@@ -199,6 +199,6 @@ ARG TARGETARCH
 COPY --from=omni-infra-provider-libvirt omni-infra-provider-libvirt-linux-${TARGETARCH} /omni-infra-provider-libvirt
 COPY --from=image-fhs / /
 COPY --from=image-ca-certificates / /
-LABEL org.opencontainers.image.source=https://github.com/siderolabs/omni-infra-provider-libvirt
+LABEL org.opencontainers.image.source=https://github.com/mort666/omni-infra-provider-libvirt
 ENTRYPOINT ["/omni-infra-provider-libvirt"]
 

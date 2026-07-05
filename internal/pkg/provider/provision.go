@@ -6,24 +6,26 @@
 package provider
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/digitalocean/go-libvirt"
 	"github.com/google/uuid"
+	"github.com/siderolabs/omni/client/pkg/constants"
 	"github.com/siderolabs/omni/client/pkg/infra/provision"
 	"go.uber.org/zap"
 	"libvirt.org/go/libvirtxml"
 
-	"github.com/siderolabs/omni-infra-provider-libvirt/api/specs"
-	"github.com/siderolabs/omni-infra-provider-libvirt/internal/pkg/provider/cidata"
-	"github.com/siderolabs/omni-infra-provider-libvirt/internal/pkg/provider/resources"
+	"github.com/mort666/omni-infra-provider-libvirt/api/specs"
+	libvirtmanager "github.com/mort666/omni-infra-provider-libvirt/internal/pkg/libvirt"
+	"github.com/mort666/omni-infra-provider-libvirt/internal/pkg/libvirt/cloudinit"
+	vmmanager "github.com/mort666/omni-infra-provider-libvirt/internal/pkg/libvirt/vm"
+	"github.com/mort666/omni-infra-provider-libvirt/internal/pkg/provider/resources"
 )
 
 const (
@@ -37,13 +39,15 @@ const (
 type Provisioner struct {
 	libvirtClient *libvirt.Libvirt
 	imageCache    *ImageCache
+	libvirtmgr    *libvirtmanager.Manager
 }
 
 // NewProvisioner creates a new provisioner.
-func NewProvisioner(libvirtClient *libvirt.Libvirt, imageCache *ImageCache) *Provisioner {
+func NewProvisioner(libvirtClient *libvirt.Libvirt, imageCache *ImageCache, manager *libvirtmanager.Manager) *Provisioner {
 	return &Provisioner{
 		libvirtClient: libvirtClient,
 		imageCache:    imageCache,
+		libvirtmgr:    manager,
 	}
 }
 
@@ -79,20 +83,25 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 		provision.NewStep(
 			"createSchematic",
 			func(ctx context.Context, logger *zap.Logger, pctx provision.Context[*resources.Machine]) error {
-				schematicID, err := pctx.GenerateSchematicID(ctx, logger)
+
+				schematicID, err := pctx.GenerateSchematicID(
+					ctx, logger,
+					provision.WithExtraExtensions("siderolabs/qemu-guest-agent", "siderolabs/glibc", "siderolabs/fuse3", "siderolabs/util-linux-tools", "siderolabs/iscsi-tools"),
+					provision.WithoutConnectionParams(),
+					provision.WithExtraKernelArgs(),
+				)
 				if err != nil {
 					return provision.NewRetryErrorf(time.Second*10, "error generating schematic ID: %w", err)
 				}
 
-				pctx.State.TypedSpec().Value.SchematicId = schematicID
 				logger.Info("created schematic " + schematicID)
-
+				pctx.State.TypedSpec().Value.Schematic = schematicID
 				return nil
 			},
 		),
 
 		provision.NewStep(
-			"provisionPrimaryDisk",
+			"provisionISO",
 			func(ctx context.Context, logger *zap.Logger, pctx provision.Context[*resources.Machine]) error {
 				var data Data
 
@@ -101,50 +110,79 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 					return err
 				}
 
-				schematicID := pctx.State.TypedSpec().Value.SchematicId
-				talosVersion := pctx.GetTalosVersion()
+				url, err := url.Parse(constants.ImageFactoryBaseURL)
+				if err != nil {
+					return err
+				}
+				vmName := pctx.GetRequestID()
+				url = url.JoinPath(
+					"image",
+					pctx.State.TypedSpec().Value.Schematic,
+					pctx.GetTalosVersion(),
+					"nocloud-amd64.iso",
+				)
 
 				// Acquire image from cache (downloads if needed, deduplicates concurrent requests)
-				filePath, err := p.imageCache.Acquire(ctx, schematicID, talosVersion)
+				filePath, err := p.imageCache.Acquire(ctx, pctx.State.TypedSpec().Value.Schematic, pctx.GetTalosVersion(), "iso")
 				if err != nil {
 					return provision.NewRetryErrorf(time.Second*10, "error fetching image: %w", err)
 				}
-				defer p.imageCache.Release(schematicID, talosVersion)
+				defer p.imageCache.Release(pctx.State.TypedSpec().Value.Schematic, pctx.GetTalosVersion(), "iso")
 
-				vmName := pctx.GetRequestID()
-				volName := fmt.Sprintf("%s.qcow2", vmName)
-				pctx.State.TypedSpec().Value.PoolName = data.StoragePool
+				fi, _ := os.Stat(filePath)
 
-				vol, err := createVolume(p.libvirtClient, data.StoragePool, volName, diskFormatQcow2, data.DiskSize)
-				if err != nil {
-					return fmt.Errorf("error creating disk: %w", err)
-				}
+				logger.Info("acquired iso", zap.String("local-cache", filePath), zap.Uint64("file-size", uint64(fi.Size())))
+
+				isoName := fmt.Sprintf("%s-%s-nocloud-amd64.iso", vmName, pctx.State.TypedSpec().Value.Schematic)
+
+				logger.Info("provisioning iso", zap.String("nocloud-amd64-iso", url.String()))
 
 				fh, err := os.Open(filePath)
 				if err != nil {
 					return fmt.Errorf("error opening local disk image: %w", err)
 				}
-				defer fh.Close() //nolint:errcheck
+				defer fh.Close()
 
-				r, err := gzip.NewReader(fh)
-				if err != nil {
-					return fmt.Errorf("error opening gzip image reader: %w", err)
-				}
-				defer r.Close() //nolint:errcheck
-
-				err = p.libvirtClient.StorageVolUpload(vol, r, 0, 0, 0)
-				if err != nil {
-					return fmt.Errorf("%w: %w", errUploadImage, err)
+				// if volume exists, delete old version
+				if vol, errGetVol := getVol(p.libvirtClient, "isos", isoName); errGetVol == nil {
+					if errVolDel := p.libvirtClient.StorageVolDelete(vol, 0); errVolDel != nil {
+						return fmt.Errorf("delete old cidata volume: %w, name: %s", errVolDel, isoName)
+					}
 				}
 
-				volSize := data.DiskSize * GiB
-
-				err = p.libvirtClient.StorageVolResize(vol, volSize, 0)
+				vol, err := p.libvirtmgr.Volume.CreateFrom("isos", isoName, diskFormatRaw, uint64(fi.Size()), fh)
 				if err != nil {
-					return fmt.Errorf("expanding volume %s to size %d failed", volName, volSize)
+					return err
+				}
+				pctx.State.TypedSpec().Value.IsoVolName = vol.Name
+				pctx.State.TypedSpec().Value.IsoVolPath = vol.ID
+
+				logger.Info("provisioned ISO", zap.String("volume", vol.Name), zap.String("local-path", vol.ID))
+				return nil
+			},
+		),
+
+		provision.NewStep(
+			"provisionVMVolume",
+			func(ctx context.Context, logger *zap.Logger, pctx provision.Context[*resources.Machine]) error {
+				var data Data
+
+				err := pctx.UnmarshalProviderData(&data)
+				if err != nil {
+					return err
 				}
 
-				pctx.State.TypedSpec().Value.VmVolName = volName
+				vmName := pctx.GetRequestID()
+				volName := fmt.Sprintf("%s-volume", vmName)
+
+				vol, err := p.libvirtmgr.Volume.Create(data.StoragePool, volName, diskFormatRaw, data.DiskSize*GiB)
+				if err != nil {
+					return err
+				}
+
+				pctx.State.TypedSpec().Value.PoolName = vol.Pool
+				pctx.State.TypedSpec().Value.VmVolName = vol.Name
+				pctx.State.TypedSpec().Value.VmVolPath = vol.ID
 
 				return nil
 			},
@@ -167,10 +205,10 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 					)
 
 					for idx, additionalDiskSpec := range data.AdditionalDisks {
-						volName := fmt.Sprintf("%s-%d-%s.qcow2", vmName, idx, additionalDiskSpec.Type)
+						volName := fmt.Sprintf("%s-%d-%s", vmName, idx, additionalDiskSpec.Type)
 						volSize := additionalDiskSpec.Size * GiB
 
-						_, err = createVolume(p.libvirtClient, data.StoragePool, volName, diskFormatQcow2, volSize)
+						_, err = createVolume(p.libvirtClient, data.StoragePool, volName, additionalDiskSpec.Type, volSize)
 						if err != nil {
 							return fmt.Errorf("error creating disk: %w", err)
 						}
@@ -207,45 +245,79 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 
 				var (
 					vmName  = pctx.GetRequestID()
-					volName = fmt.Sprintf("%s-cidata.iso", vmName)
-
-					metadata    = bytes.NewReader(cidata.MetaData(vmName))
-					userdata    = bytes.NewReader([]byte("#cloud-config\n")) // empty
-					networkdata = bytes.NewReader(cidata.NetworkData())      // TODO: allow to be passed by user?
+					volName = fmt.Sprintf("user-data-%s.iso", vmName)
 				)
 
-				isoData, err := cidata.GenerateCidataISO(metadata, userdata, networkdata)
-				if err != nil {
-					return fmt.Errorf("error generating cidata ISO: %w", err)
+				metadata := &cloudinit.MetaData{
+					InstanceID:    pctx.State.TypedSpec().Value.Uuid,
+					LocalHostname: vmName,
+					Hostname:      vmName,
 				}
 
-				pool, err := p.libvirtClient.StoragePoolLookupByName(data.StoragePool)
-				if err != nil {
-					return fmt.Errorf("error looking up storage pool: %w", err)
+				networkdata := &cloudinit.NetworkConfig{
+					Version: 2,
+					Ethernets: map[string]cloudinit.Ethernet{
+						"all-en": {
+							Match: cloudinit.Match{
+								Name: "en*",
+							},
+							DHCP:  true,
+							DHCP6: true,
+							DNS: cloudinit.DNS{
+								Servers: []string{"10.131.69.164", "10.131.69.128"},
+							},
+						},
+						"all-eth": {
+							Match: cloudinit.Match{
+								Name: "eth*",
+							},
+							DHCP:  true,
+							DHCP6: true,
+							DNS: cloudinit.DNS{
+								Servers: []string{"10.131.69.164", "10.131.69.128"},
+							},
+						},
+					},
 				}
 
-				// if volume exists, delete old version
-				if vol, errGetVol := getVol(p.libvirtClient, data.StoragePool, volName); errGetVol == nil {
+				vendordata := pctx.ConnectionParams.JoinConfig
+				logger.Info("cloud-init", zap.Any("metadata", metadata), zap.String("userdata", pctx.ConnectionParams.JoinConfig), zap.Any("networkdata", networkdata))
+
+				if vol, errGetVol := getVol(p.libvirtClient, "config", volName); errGetVol == nil {
 					if errVolDel := p.libvirtClient.StorageVolDelete(vol, 0); errVolDel != nil {
 						return fmt.Errorf("delete old cidata volume: %w, name: %s", errVolDel, volName)
 					}
 				}
 
-				volSize := uint64(len(isoData))
+				talosconfig := cloudinit.NewTalosConfig(nil, metadata, &vendordata, networkdata, logger)
 
-				vol, err := createVolume(p.libvirtClient, pool.Name, volName, diskFormatRaw, volSize)
+				isoConfig, err := talosconfig.ISO(volName)
+
 				if err != nil {
-					return fmt.Errorf("error creating cidata volume: %w", err)
+					return fmt.Errorf("failed to create config ISO: %w", err)
 				}
 
-				err = p.libvirtClient.StorageVolUpload(vol, bytes.NewReader(isoData), 0, 0, 0)
+				fi, _ := os.Stat(isoConfig)
+
+				logger.Info("acquired iso", zap.String("local-cache", isoConfig), zap.Uint64("file-size", uint64(fi.Size())))
+
+				logger.Info("provisioning cidata ISO", zap.String("volume", volName))
+
+				fh, err := os.Open(isoConfig)
 				if err != nil {
-					return fmt.Errorf("error uploading cidata ISO: %w", err)
+					return fmt.Errorf("error opening local disk image: %w", err)
+				}
+				defer fh.Close()
+
+				isoImage, err := p.libvirtmgr.Volume.CreateFrom("config", volName, diskFormatRaw, uint64(fi.Size()), fh)
+				if err != nil {
+					return err
 				}
 
-				pctx.State.TypedSpec().Value.CidataVolName = volName
+				pctx.State.TypedSpec().Value.CidataVolName = isoImage.Name
+				pctx.State.TypedSpec().Value.CidataVolPath = isoImage.ID
 
-				logger.Info("provisioned cidata ISO", zap.String("volume", volName))
+				logger.Info("provisioned cidata ISO", zap.String("volume", isoImage.Name), zap.String("local-path", isoImage.ID))
 
 				return nil
 			},
@@ -270,7 +342,7 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 
 				// assemble primary disk volume
 
-				vol, err := getVol(p.libvirtClient, data.StoragePool, volName)
+				_, err = getVol(p.libvirtClient, data.StoragePool, volName)
 				if err != nil {
 					return provision.NewRetryErrorf(time.Second*10, "error fetching volume: %w", err)
 				}
@@ -278,21 +350,71 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 				disks := []libvirtxml.DomainDisk{
 					{
 						Device: "disk",
+						Boot: &libvirtxml.DomainDeviceBoot{
+							Order: 1,
+						},
 						Driver: &libvirtxml.DomainDiskDriver{
 							Name:  "qemu",
-							Type:  "qcow2",
+							Type:  "raw",
 							Cache: "none",
 							IO:    "native",
 						},
-						Source: &libvirtxml.DomainDiskSource{
-							Volume: &libvirtxml.DomainDiskSourceVolume{
-								Pool:   vol.Pool,
-								Volume: vol.Name,
+						Alias: &libvirtxml.DomainAlias{
+							Name: "scsi0-0-0-3",
+						},
+						Address: &libvirtxml.DomainAddress{
+							Drive: &libvirtxml.DomainAddressDrive{
+								Controller: Pointer(uint(0)),
+								Bus:        Pointer(uint(0)),
+								Target:     Pointer(uint(0)),
+								Unit:       Pointer(uint(3)),
 							},
 						},
 						Target: &libvirtxml.DomainDiskTarget{
-							Dev: "vda",
-							Bus: "virtio",
+							Dev: "sdd",
+							Bus: "scsi",
+						},
+						Source: &libvirtxml.DomainDiskSource{
+							File: &libvirtxml.DomainDiskSourceFile{
+								File: pctx.State.TypedSpec().Value.VmVolPath,
+							},
+						},
+					}, {
+						Device: "cdrom",
+						Boot: &libvirtxml.DomainDeviceBoot{
+							Order: 2,
+						},
+						ReadOnly: &libvirtxml.DomainDiskReadOnly{},
+						Driver: &libvirtxml.DomainDiskDriver{
+							Name: "qemu",
+							Type: "raw",
+						},
+						Target: &libvirtxml.DomainDiskTarget{
+							Dev: "sdb",
+							Bus: "sata",
+						},
+						Source: &libvirtxml.DomainDiskSource{
+							File: &libvirtxml.DomainDiskSourceFile{
+								File: pctx.State.TypedSpec().Value.IsoVolPath,
+							},
+						},
+					}, {
+						Device: "cdrom",
+						Boot: &libvirtxml.DomainDeviceBoot{
+							Order: 3,
+						},
+						Driver: &libvirtxml.DomainDiskDriver{
+							Name: "qemu",
+							Type: "raw",
+						},
+						Target: &libvirtxml.DomainDiskTarget{
+							Dev: "sdc",
+							Bus: "sata",
+						},
+						Source: &libvirtxml.DomainDiskSource{
+							File: &libvirtxml.DomainDiskSourceFile{
+								File: pctx.State.TypedSpec().Value.CidataVolPath,
+							},
 						},
 					},
 				}
@@ -300,7 +422,7 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 				// assemble additional disk volumes
 
 				var (
-					sataDiskCount = 1 // account for root disk
+					sataDiskCount = 2 // account for root disk
 					nvmeDiskCount = 0
 				)
 
@@ -358,43 +480,51 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 					disks = append(disks, additionalDisk)
 				}
 
-				// add cidata ISO as cdrom, if present
-				cidataVolName := pctx.State.TypedSpec().Value.CidataVolName
-				if cidataVolName != "" {
-					cidataDisk := libvirtxml.DomainDisk{
-						Device: "cdrom",
-						Driver: &libvirtxml.DomainDiskDriver{
-							Name: "qemu",
-							Type: "raw",
-						},
-						Source: &libvirtxml.DomainDiskSource{
-							Volume: &libvirtxml.DomainDiskSourceVolume{
-								Pool:   data.StoragePool,
-								Volume: cidataVolName,
-							},
-						},
-						Target: &libvirtxml.DomainDiskTarget{
-							Dev: "sda",
-							Bus: "sata",
-						},
-						ReadOnly: &libvirtxml.DomainDiskReadOnly{},
-					}
-
-					disks = append(disks, cidataDisk)
-				}
-
 				// assemble network interfaces
+
+				// <interface type="bridge" trustGuestRxFilters="yes">
+				//   <mac address="52:54:00:ab:ff:ff"/>
+				//   <source bridge="ovsbr0"/>
+				//   <virtualport type="openvswitch">
+				//     <parameters interfaceid="58893bf5-fc72-408e-970f-7cb8023357ed"/>
+				//   </virtualport>
+				//   <target dev="vmbr0"/>
+				//   <model type="virtio"/>
+				//   <alias name="net0"/>
+				//   <address type="pci" domain="0x0000" bus="0x07" slot="0x00" function="0x0"/>
+				// </interface>
 
 				var networkInterfaces []libvirtxml.DomainInterface
 
+				ifnum := p.libvirtmgr.BridgeCount
+				var ifname string
+
 				for _, ifaceData := range data.NetworkInterfaces {
+					if ifaceData.TargetName != "" && strings.Compare(ifaceData.TargetName, "omnibr") == 0 {
+						ifname = fmt.Sprintf("%s%d", ifaceData.TargetName, ifnum)
+						p.libvirtmgr.BridgeCount = p.libvirtmgr.BridgeCount + 1
+						pctx.State.TypedSpec().Value.VmIfName = ifname
+					}
+
 					iface := libvirtxml.DomainInterface{
+						MAC: &libvirtxml.DomainInterfaceMAC{
+							Address: Default(ifaceData.PhysicalAddress, MacSingle()),
+						},
+						Target: &libvirtxml.DomainInterfaceTarget{
+							Dev: Default(pctx.State.TypedSpec().Value.VmIfName, ifname, "omnibr0"),
+						},
+						TrustGuestRXFilters: "yes",
 						Model: &libvirtxml.DomainInterfaceModel{
-							Type: ifaceData.Driver,
+							Type: Default(ifaceData.Driver, "virtio"),
+						},
+						VirtualPort: &libvirtxml.DomainInterfaceVirtualPort{
+							Params: &libvirtxml.DomainInterfaceVirtualPortParams{
+								OpenVSwitch: &libvirtxml.DomainInterfaceVirtualPortParamsOpenVSwitch{},
+							},
 						},
 						Source: &libvirtxml.DomainInterfaceSource{
-							Network: &libvirtxml.DomainInterfaceSourceNetwork{
-								Network: ifaceData.NetworkName,
+							Bridge: &libvirtxml.DomainInterfaceSourceBridge{
+								Bridge: Default(ifaceData.BridgeName, "ovsbr0"),
 							},
 						},
 					}
@@ -402,107 +532,20 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 					networkInterfaces = append(networkInterfaces, iface)
 				}
 
-				// generate libvirt XML spec
-				// https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainCreateXML
-				domData := libvirtxml.Domain{
-					Type: "kvm",
-					Name: vmName,
-					// this one is really important, it has to match the UUID in omni
-					UUID: pctx.State.TypedSpec().Value.Uuid,
-					Memory: &libvirtxml.DomainMemory{
-						Unit:  "MiB",
-						Value: data.Memory,
-					},
-					VCPU: &libvirtxml.DomainVCPU{
-						Placement: "static",
-						Value:     data.Cores,
-					},
-					OS: &libvirtxml.DomainOS{
-						Type: &libvirtxml.DomainOSType{
-							Arch:    "x86_64",
-							Machine: "q35",
-							Type:    "hvm",
-						},
-						BootDevices: []libvirtxml.DomainBootDevice{
-							{Dev: "hd"},
-						},
-					},
-					CPU: &libvirtxml.DomainCPU{
-						Mode: "host-passthrough",
-					},
-					Features: &libvirtxml.DomainFeatureList{
-						ACPI: &libvirtxml.DomainFeature{},
-						APIC: &libvirtxml.DomainFeatureAPIC{},
-					},
-					Devices: &libvirtxml.DomainDeviceList{
-						Channels: []libvirtxml.DomainChannel{
-							{
-								Source: &libvirtxml.DomainChardevSource{
-									UNIX: &libvirtxml.DomainChardevSourceUNIX{
-										Mode: "bind",
-										Path: "/var/lib/libvirt/qemu/channel/target/omni-node-001.org.qemu.guest_agent.0",
-									},
-								},
-								Target: &libvirtxml.DomainChannelTarget{
-									VirtIO: &libvirtxml.DomainChannelTargetVirtIO{
-										Name: "org.qemu.guest_agent.0",
-									},
-								},
-							},
-						},
-						Emulator:   "", // let libvirt pick qemu-system-x86_64
-						Disks:      disks,
-						Interfaces: networkInterfaces,
-						MemBalloon: &libvirtxml.DomainMemBalloon{
-							Model: "virtio",
-						},
-						Serials: []libvirtxml.DomainSerial{
-							// { Target: &libvirtxml.DomainSerialTarget{Type: "pty",}},
-						},
-						Consoles: []libvirtxml.DomainConsole{
-							{
-								Target: &libvirtxml.DomainConsoleTarget{
-									Type: "serial",
-								},
-							},
-							// {Target: &libvirtxml.DomainConsoleTarget{Type: "virtio"}},
-						},
-						Videos: []libvirtxml.DomainVideo{
-							{
-								Model: libvirtxml.DomainVideoModel{
-									Type: "virtio",
-									Resolution: &libvirtxml.DomainVideoResolution{
-										X: 1920,
-										Y: 1080,
-									},
-								},
-							},
-						},
-						Graphics: []libvirtxml.DomainGraphic{
-							{
-								Spice: &libvirtxml.DomainGraphicSpice{
-									AutoPort: "yes",
-								},
-							},
-						},
-					},
+				vmCfg := vmmanager.Config{
+					Uuid:     pctx.State.TypedSpec().Value.Uuid,
+					CPUCount: data.Cores,
+					Memory:   uint64(data.Memory),
 				}
-
-				domXML, err := domData.Marshal()
-				if err != nil {
-					return fmt.Errorf("error rendering domain XML: %w", err)
-				}
-
-				logger.Debug("domain XML", zap.String("xml_data", domXML))
-
-				// create domain
-				_, err = p.libvirtClient.DomainDefineXML(domXML)
+				err = p.libvirtmgr.VM.Create(vmName, &vmCfg, disks, networkInterfaces)
 				if err != nil {
 					return fmt.Errorf("creating domain: %w", err)
 				}
 
+
 				// set VM id in omni
 				pctx.State.TypedSpec().Value.VmName = vmName
+				pctx.State.TypedSpec().Value.VmNvramName = fmt.Sprintf("%s_VARS.fd", vmName)
 
 				return nil
 			},
@@ -513,21 +556,8 @@ func (p *Provisioner) ProvisionSteps() []provision.Step[*resources.Machine] {
 			func(ctx context.Context, logger *zap.Logger, pctx provision.Context[*resources.Machine]) error {
 				vmName := pctx.State.TypedSpec().Value.VmName
 
-				dom, err := p.libvirtClient.DomainLookupByName(vmName)
-				if err != nil {
-					return provision.NewRetryErrorf(time.Second*10, "VM lookup failed: %w", err)
-				}
+				err := p.libvirtmgr.VM.Start(vmName)
 
-				domState, _, err := p.libvirtClient.DomainGetState(dom, 0)
-				if err != nil {
-					return provision.NewRetryErrorf(time.Second*10, "error fetching domain state: %w", err)
-				}
-
-				if libvirt.DomainState(domState) == libvirt.DomainRunning {
-					return nil
-				}
-
-				err = p.libvirtClient.DomainCreate(dom)
 				if err != nil {
 					if !strings.Contains(err.Error(), "domain is already running") {
 						return provision.NewRetryErrorf(time.Second*10, "failed to start VM: %w", err)

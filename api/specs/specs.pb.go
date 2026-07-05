@@ -75,11 +75,14 @@ func (x *AdditionalDisk) GetVolName() string {
 }
 
 type NetworkInterfaces struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Driver        string                 `protobuf:"bytes,1,opt,name=driver,proto3" json:"driver,omitempty"`
-	Network       string                 `protobuf:"bytes,2,opt,name=network,proto3" json:"network,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Driver          string                 `protobuf:"bytes,1,opt,name=driver,proto3" json:"driver,omitempty"`
+	Network         string                 `protobuf:"bytes,2,opt,name=network,proto3" json:"network,omitempty"`
+	Bridge          string                 `protobuf:"bytes,3,opt,name=bridge,proto3" json:"bridge,omitempty"`
+	Target          string                 `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`
+	PhysicalAddress string                 `protobuf:"bytes,5,opt,name=physical_address,json=physicalAddress,proto3" json:"physical_address,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *NetworkInterfaces) Reset() {
@@ -126,18 +129,45 @@ func (x *NetworkInterfaces) GetNetwork() string {
 	return ""
 }
 
+func (x *NetworkInterfaces) GetBridge() string {
+	if x != nil {
+		return x.Bridge
+	}
+	return ""
+}
+
+func (x *NetworkInterfaces) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *NetworkInterfaces) GetPhysicalAddress() string {
+	if x != nil {
+		return x.PhysicalAddress
+	}
+	return ""
+}
+
 // MachineSpec is stored in Omni in the infra provisioner state.
 type MachineSpec struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	Uuid              string                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"` // required?
-	SchematicId       string                 `protobuf:"bytes,2,opt,name=schematic_id,json=schematicId,proto3" json:"schematic_id,omitempty"`
+	Schematic         string                 `protobuf:"bytes,2,opt,name=schematic,proto3" json:"schematic,omitempty"`
 	TalosVersion      string                 `protobuf:"bytes,3,opt,name=talos_version,json=talosVersion,proto3" json:"talos_version,omitempty"`
 	VmVolName         string                 `protobuf:"bytes,10,opt,name=vm_vol_name,json=vmVolName,proto3" json:"vm_vol_name,omitempty"`
 	AdditionalDisks   []*AdditionalDisk      `protobuf:"bytes,11,rep,name=additional_disks,json=additionalDisks,proto3" json:"additional_disks,omitempty"`
 	NetworkInterfaces []*NetworkInterfaces   `protobuf:"bytes,12,rep,name=network_interfaces,json=networkInterfaces,proto3" json:"network_interfaces,omitempty"`
 	CidataVolName     string                 `protobuf:"bytes,13,opt,name=cidata_vol_name,json=cidataVolName,proto3" json:"cidata_vol_name,omitempty"`
+	IsoVolName        string                 `protobuf:"bytes,14,opt,name=iso_vol_name,json=isoVolName,proto3" json:"iso_vol_name,omitempty"`
+	IsoVolPath        string                 `protobuf:"bytes,15,opt,name=iso_vol_path,json=isoVolPath,proto3" json:"iso_vol_path,omitempty"`
+	CidataVolPath     string                 `protobuf:"bytes,16,opt,name=cidata_vol_path,json=cidataVolPath,proto3" json:"cidata_vol_path,omitempty"`
+	VmVolPath         string                 `protobuf:"bytes,17,opt,name=vm_vol_path,json=vmVolPath,proto3" json:"vm_vol_path,omitempty"`
+	VmIfName          string                 `protobuf:"bytes,18,opt,name=vm_if_name,json=vmIfName,proto3" json:"vm_if_name,omitempty"`
 	PoolName          string                 `protobuf:"bytes,20,opt,name=pool_name,json=poolName,proto3" json:"pool_name,omitempty"`
 	VmName            string                 `protobuf:"bytes,21,opt,name=vm_name,json=vmName,proto3" json:"vm_name,omitempty"`
+	VmNvramName       string                 `protobuf:"bytes,25,opt,name=vm_nvram_name,json=vmNvramName,proto3" json:"vm_nvram_name,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -179,9 +209,9 @@ func (x *MachineSpec) GetUuid() string {
 	return ""
 }
 
-func (x *MachineSpec) GetSchematicId() string {
+func (x *MachineSpec) GetSchematic() string {
 	if x != nil {
-		return x.SchematicId
+		return x.Schematic
 	}
 	return ""
 }
@@ -221,6 +251,41 @@ func (x *MachineSpec) GetCidataVolName() string {
 	return ""
 }
 
+func (x *MachineSpec) GetIsoVolName() string {
+	if x != nil {
+		return x.IsoVolName
+	}
+	return ""
+}
+
+func (x *MachineSpec) GetIsoVolPath() string {
+	if x != nil {
+		return x.IsoVolPath
+	}
+	return ""
+}
+
+func (x *MachineSpec) GetCidataVolPath() string {
+	if x != nil {
+		return x.CidataVolPath
+	}
+	return ""
+}
+
+func (x *MachineSpec) GetVmVolPath() string {
+	if x != nil {
+		return x.VmVolPath
+	}
+	return ""
+}
+
+func (x *MachineSpec) GetVmIfName() string {
+	if x != nil {
+		return x.VmIfName
+	}
+	return ""
+}
+
 func (x *MachineSpec) GetPoolName() string {
 	if x != nil {
 		return x.PoolName
@@ -235,6 +300,13 @@ func (x *MachineSpec) GetVmName() string {
 	return ""
 }
 
+func (x *MachineSpec) GetVmNvramName() string {
+	if x != nil {
+		return x.VmNvramName
+	}
+	return ""
+}
+
 var File_specs_specs_proto protoreflect.FileDescriptor
 
 const file_specs_specs_proto_rawDesc = "" +
@@ -242,21 +314,33 @@ const file_specs_specs_proto_rawDesc = "" +
 	"\x11specs/specs.proto\x12\bemuspecs\">\n" +
 	"\x0eAdditionalDisk\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x18\n" +
-	"\avolName\x18\x03 \x01(\tR\avolName\"E\n" +
+	"\avolName\x18\x03 \x01(\tR\avolName\"\xa0\x01\n" +
 	"\x11NetworkInterfaces\x12\x16\n" +
 	"\x06driver\x18\x01 \x01(\tR\x06driver\x12\x18\n" +
-	"\anetwork\x18\x02 \x01(\tR\anetwork\"\xf8\x02\n" +
+	"\anetwork\x18\x02 \x01(\tR\anetwork\x12\x16\n" +
+	"\x06bridge\x18\x03 \x01(\tR\x06bridge\x12\x16\n" +
+	"\x06target\x18\x04 \x01(\tR\x06target\x12)\n" +
+	"\x10physical_address\x18\x05 \x01(\tR\x0fphysicalAddress\"\xc1\x04\n" +
 	"\vMachineSpec\x12\x12\n" +
-	"\x04uuid\x18\x01 \x01(\tR\x04uuid\x12!\n" +
-	"\fschematic_id\x18\x02 \x01(\tR\vschematicId\x12#\n" +
+	"\x04uuid\x18\x01 \x01(\tR\x04uuid\x12\x1c\n" +
+	"\tschematic\x18\x02 \x01(\tR\tschematic\x12#\n" +
 	"\rtalos_version\x18\x03 \x01(\tR\ftalosVersion\x12\x1e\n" +
 	"\vvm_vol_name\x18\n" +
 	" \x01(\tR\tvmVolName\x12C\n" +
 	"\x10additional_disks\x18\v \x03(\v2\x18.emuspecs.AdditionalDiskR\x0fadditionalDisks\x12J\n" +
 	"\x12network_interfaces\x18\f \x03(\v2\x1b.emuspecs.NetworkInterfacesR\x11networkInterfaces\x12&\n" +
-	"\x0fcidata_vol_name\x18\r \x01(\tR\rcidataVolName\x12\x1b\n" +
+	"\x0fcidata_vol_name\x18\r \x01(\tR\rcidataVolName\x12 \n" +
+	"\fiso_vol_name\x18\x0e \x01(\tR\n" +
+	"isoVolName\x12 \n" +
+	"\fiso_vol_path\x18\x0f \x01(\tR\n" +
+	"isoVolPath\x12&\n" +
+	"\x0fcidata_vol_path\x18\x10 \x01(\tR\rcidataVolPath\x12\x1e\n" +
+	"\vvm_vol_path\x18\x11 \x01(\tR\tvmVolPath\x12\x1c\n" +
+	"\n" +
+	"vm_if_name\x18\x12 \x01(\tR\bvmIfName\x12\x1b\n" +
 	"\tpool_name\x18\x14 \x01(\tR\bpoolName\x12\x17\n" +
-	"\avm_name\x18\x15 \x01(\tR\x06vmNameB=Z;github.com/siderolabs/omni-infra-provider-libvirt/api/specsb\x06proto3"
+	"\avm_name\x18\x15 \x01(\tR\x06vmName\x12\"\n" +
+	"\rvm_nvram_name\x18\x19 \x01(\tR\vvmNvramNameB:Z8github.com/mort666/omni-infra-provider-libvirt/api/specsb\x06proto3"
 
 var (
 	file_specs_specs_proto_rawDescOnce sync.Once
