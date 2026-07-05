@@ -1,5 +1,20 @@
 # Omni Infrastructure Provider for libvirt
 
+## Fork and Differences vs Upstream
+
+Fork of original omni-infra-provider-libvirt provider to change the vm creation to build more robust VM and use OpenVSwitch infrastructure on the VM hypervisor to handle networking that is less brittle and has fewer restrictions for connectivity.
+
+- Use of nocloud ISO and startup userdata creation reworked to be a little more forgiving and stop images using external DNS resolvers during initial startup which results in a startup loop that cannot locate locally hosted Omni servers when local DNS naming is not externally managed.
+- OpenVSwitch is used on the hypervisor to handle VM connectivity to the host and wider LAN environments, using bridged network devices that avoid libvirtd limitations for bridged network access. Somewhat hacky code as target devices must be unique and provisioning process for libvirtd is opaque and none intuitive for detection of existing devices with a given name.
+- Deprovision is a little more structured to handle UEFI NVRAM, deletion of storage etc. So previous implementation would fail on VM creation due to NVRAM varstore not being properly undefined and storage removed.
+- ISOs used for startup not the qcow2 disk image in similar way to Proxmox provider as it is more reliable, with unique ISO per VM to mitigate volume sharing issues.
+- VM initial disk is created blank to make it less likely to end up in a boot loop provisioning with bad network and nameserver setup as qcow2 image seems to use hard coded external DNS
+- VM creation management code is very much WIP but works and reliably provisions and deprovisions multiple VMs whereas previous version would often fail with duplicate volumes and network devices
+
+This is not supported by siderolabs, and this initial vision is a little 'hacky'.
+
+## Overview
+
 Can be used to automatically provision Talos nodes in `libvirtd`.
 
 ## Configuration
